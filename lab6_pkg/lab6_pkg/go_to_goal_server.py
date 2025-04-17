@@ -66,6 +66,9 @@ class GoToGoalNode(Node):
 
         # Map
         self.cost_map = None
+        
+        #List
+        self.point_list = []
 
     # Waypoint
     def go_to_waypoint(self, waypoint_x, waypoint_y, goal_handle, feedback):
@@ -112,13 +115,37 @@ class GoToGoalNode(Node):
             distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
 
 
+    def grelper(self, x, y,goal_x, goal_y):
+        self.point_list.append((x, y))
+        matrix = self.cost_map
+        width = len(matrix(0))
+        height = len(matrix)
+        if  x == goal_x and y==goal_y:
+            return;
+        directions = [(-1, -1), (-1, 0), (-1,1), (0, -1), (0, 1), (1, -1), (1, 0), (1,1)]
+        minimum = float('inf')
+        min_direction = None
+
+        for dx, dy in directions: 
+            tx = x + dx
+            ty = y + dy
+            if 0 <= tx < width and 0 <= ty < height:
+                if matrix [ty][tx] < minimum:
+                    minimum = matrix [ty][tx]
+                    min_direction = (dx, dy)
+
+        if min_direction is not None:
+            next_x = x + min_direction[0]
+            next_y = y + min_direction[1]
+            self.grelper(next_x, next_y, goal_x, goal_y)
+
     # Greedy Algorithm
-    # def greedy(self, goal_x, goal_y):
-                
-
-
-
-    # Goal callback
+    def greedy(self, x, y, goal_x, goal_y):
+        goal_x_index, goal_y_index = self.real_to_index(goal_x, goal_y)
+        x_index, y_index = self.real_to_index(x, y)
+        self.grelper(x_index, y_index, goal_x_index, goal_y_index)
+    
+    # Goal callback  
     def goal_callback(self, goal_request):
         self.get_logger().info("Received goal request")
 
@@ -146,40 +173,9 @@ class GoToGoalNode(Node):
         # Pythagorean Thrm
         distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
         self.get_logger().info("Distance from goal: " + str(distance))
-
-        while distance > 0.1:
-
-            move = Twist()
-
-            if self.obstacle == True:
-                self.get_logger().info("Obstacle detected, cancelling goal")
-                goal_handle.canceled()
-
-            # angle we want
-            angle = round((math.atan2((goal_y - self.y),(goal_x - self.x))), 1)
-
-            if abs(angle - round(self.ang, 1)) > 0.2:
-                move.angular.z = 0.2
-                move.linear.x = 0.0
-
-            else: 
-                move.angular.z = 0.0
-                move.linear.x = 0.3 * distance;
-            
-            #feedback fields
-            feedback.current_x = float(self.x)
-            feedback.current_y = float(self.y)
-            feedback.current_theta = float(self.ang)
-            feedback.distance_from_goal = float(distance)
-             # Publish Feedback
-            goal_handle.publish_feedback(feedback)
-
-            #publish Twist message
-            self.get_logger().info("publishing velocity. Linear x: " + str(move.linear.x) + " Angular z: " + str(move.angular.z) + "goal angle: " + str(angle))
-            self.velocity_pub.publish(move)
-           
-            #calculate new distance
-            distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
+        self.greedy(self.x, self.y)
+        for point in self.point_list:
+            self.go_to_waypoint(point(0), point(1), goal_handle)
 
         #rotate to meet the desired goal_theta
         range_low = goal_theta - 0.3
@@ -222,8 +218,8 @@ class GoToGoalNode(Node):
     
     # Helper function JUST DO OPPOSITE OF ABOVE +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     def real_to_index(self,real_x, real_y):
-        index_x = round()
-        index_y = round()
+        index_x = round((real_x-self.origin_x)/self.resolution)
+        index_y = round((real_y-self.origin_y)/self.resolution)
         return index_x, index_y
 
     # get occupancy grid and find free, unknown, obstacle space
@@ -270,14 +266,15 @@ class GoToGoalNode(Node):
                 real_x,real_y = self.index_to_real(col,row)
                 point = occupancy_grid[col + (row*self.width)]
                 # translate goal x and goal y in index, resolution that ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+                goal_x_index, goal_y_index = self.real_to_index(real_x, real_y)
 
-                self.cost_map[col][row] = int(math.sqrt((self.goal_x-row)**2) + ((self.goal_y-col)**2))
+                self.cost_map[col][row] = int(math.sqrt((goal_x_index-row)**2) + ((goal_y_index-col)**2))
 
                 for obstacle in self.obstacle_space:
                     distance = math.sqrt((((real_x - obstacle[0])**2) + ((real_y - obstacle[1])**2)))
                     if distance <= 0.3:
                         self.cost_map[col][row] = 1000
-
+        
 
 
 
