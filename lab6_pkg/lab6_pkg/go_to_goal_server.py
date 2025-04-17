@@ -70,12 +70,16 @@ class GoToGoalNode(Node):
         #List
         self.point_list = []
 
-    # Waypoint
-    def go_to_waypoint(self, waypoint_x, waypoint_y, goal_handle, feedback):
-        goal_x = waypoint_x
-        goal_y = waypoint_y
-        
+        # Occupancy grid
+        self.occupancy_grid = None
 
+    
+    # HELPER FUNCTIONS
+
+    def go_to_waypoint(self, waypoint, goal_handle, feedback):
+        # waypoints should be real coordinates
+        goal_x, goal_y = waypoint
+        
         # Pythagorean Thrm
         distance = math.sqrt((((self.x - goal_x)**2) + ((self.y - goal_y)**2)))
         self.get_logger().info("Distance from goal: " + str(distance))
@@ -113,8 +117,16 @@ class GoToGoalNode(Node):
            
             #calculate new distance
             distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
+        self.get_logger().info("arrived at waypoint, moving to next point")
 
+     # Greedy Algorithm
+    def greedy(self, x, y, goal_x, goal_y):
+        goal_x_index, goal_y_index = self.real_to_index(goal_x, goal_y)
+        # x and y should be indices
+        x_index, y_index = self.real_to_index(x, y)
+        self.grelper(x_index, y_index, goal_x_index, goal_y_index)
 
+    # all attributes are indices
     def grelper(self, x, y,goal_x, goal_y):
         self.point_list.append((x, y))
         matrix = self.cost_map
@@ -139,28 +151,21 @@ class GoToGoalNode(Node):
             next_y = y + min_direction[1]
             self.grelper(next_x, next_y, goal_x, goal_y)
 
-    # Greedy Algorithm
-    def greedy(self, x, y, goal_x, goal_y):
-        goal_x_index, goal_y_index = self.real_to_index(goal_x, goal_y)
-        x_index, y_index = self.real_to_index(x, y)
-        self.grelper(x_index, y_index, goal_x_index, goal_y_index)
+    # index in map to real x y
+    def index_to_real(self,col,row):
+        real_x = round((col*self.resolution) + self.origin_x,2)
+        real_y = round((row*self.resoltuion) + self.origin_y,2)
+        return real_x,real_y
     
-    # Goal callback  
-    def goal_callback(self, goal_request):
-        self.get_logger().info("Received goal request")
+    # real x and y to index in map
+    def real_to_index(self,real_x, real_y):
+        index_x = round((real_x-self.origin_x)/self.resolution)
+        index_y = round((real_y-self.origin_y)/self.resolution)
+        return index_x, index_y
+       
 
-        for obstacle in self.obstacle_space:
-            self.get_logger().info("Obstacle")
-            # Pythagorean Thrm
-            distance = math.sqrt((((obstacle[0] - goal_request.goal_x)**2) + ((obstacle[1] - goal_request.goal_y)**2)))
-            
-            if distance < 0.3:
-                self.get_logger().info("There is an obstacle 0.3 m away, rejecting goal")
-                return GoalResponse.REJECT
-        self.get_logger().info("Goal accepted in server")
-        return GoalResponse.ACCEPT
-        
-    # Execute callback
+    # CALLBACKS
+
     def execute_callback(self, goal_handle):
         self.get_logger().info("Executing execute_callback")
 
@@ -170,12 +175,28 @@ class GoToGoalNode(Node):
         goal_y = goal_handle.request.goal_y
         goal_theta = goal_handle.request.goal_theta
 
+        # create cost_map
+        for col in range(self.height):
+            for row in range(self.width):
+                real_x,real_y = self.index_to_real(col,row)
+                point = self.occupancy_grid[col + (row*self.width)]
+
+                goal_x_index, goal_y_index = self.real_to_index(goal_x, goal_y)
+
+                self.cost_map[col][row] = int(math.sqrt((goal_x_index-row)**2) + ((goal_y_index-col)**2))
+
+                for obstacle in self.obstacle_space:
+                    distance = math.sqrt((((real_x - obstacle[0])**2) + ((real_y - obstacle[1])**2)))
+                    if distance <= 0.3:
+                        self.cost_map[col][row] = 1000
+
         # Pythagorean Thrm
         distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
         self.get_logger().info("Distance from goal: " + str(distance))
-        self.greedy(self.x, self.y)
+        self.greedy(self.x, self.y, goal_x, goal_y)
+        # go to each point
         for point in self.point_list:
-            self.go_to_waypoint(point(0), point(1), goal_handle)
+            self.go_to_waypoint(point, goal_handle, feedback)
 
         #rotate to meet the desired goal_theta
         range_low = goal_theta - 0.3
@@ -201,26 +222,24 @@ class GoToGoalNode(Node):
         return result
 
 
-    # Callback for position
+    def goal_callback(self, goal_request):
+        self.get_logger().info("Received goal request")
+
+        for obstacle in self.obstacle_space:
+            self.get_logger().info("Obstacle")
+            distance = math.sqrt((((obstacle[0] - goal_request.goal_x)**2) + ((obstacle[1] - goal_request.goal_y)**2)))
+            
+            if distance < 0.3:
+                self.get_logger().info("There is an obstacle 0.3 m away, rejecting goal")
+                return GoalResponse.REJECT
+        self.get_logger().info("Goal accepted in server")
+        return GoalResponse.ACCEPT
+    
     def callback_pos(self, msg):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         rot_q = msg.pose.pose.orientation
         (roll, pitch, self.ang) = euler_from_quaternion([rot_q.x, rot_q.y, rot_q.z, rot_q.w])
-        #self.ang = msg.pose.pose.orientation.z
-
-
-    # index in map to real x y
-    def index_to_real(self,col,row):
-        real_x = round((col*self.resolution) + self.origin_x,2)
-        real_y = round((row*self.resoltuion) + self.origin_y,2)
-        return real_x,real_y
-    
-    # Helper function JUST DO OPPOSITE OF ABOVE +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    def real_to_index(self,real_x, real_y):
-        index_x = round((real_x-self.origin_x)/self.resolution)
-        index_y = round((real_y-self.origin_y)/self.resolution)
-        return index_x, index_y
 
     # get occupancy grid and find free, unknown, obstacle space
     def callback_map(self,msg):
@@ -242,41 +261,24 @@ class GoToGoalNode(Node):
         robot_y = round((self.y-self.origin_y)/self.resolution)
         
         # Occupancy grid data in one big list
-        occupancy_grid = msg.data
+        self.occupancy_grid = msg.data
 
         # Empty lists to add obstacles to
         self.obstacle_space = []
         
+        # add all of the obstacles to a list
         row = 0
         while row < self.height:
             col = 0
             while col < self.width:
                 real_x,real_y = self.index_to_real(col,row)
-                point = occupancy_grid[col + (row*self.width)]
+                point = self.occupancy_grid[col + (row*self.width)]
 
                 if point > 25:
                     self.obstacle_space.append((real_x, real_y))
 
                 col += 1
             row += 1
-
-        # Map loop
-        for col in range(self.height):
-            for row in range(self.width):
-                real_x,real_y = self.index_to_real(col,row)
-                point = occupancy_grid[col + (row*self.width)]
-                # translate goal x and goal y in index, resolution that ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-                goal_x_index, goal_y_index = self.real_to_index(real_x, real_y)
-
-                self.cost_map[col][row] = int(math.sqrt((goal_x_index-row)**2) + ((goal_y_index-col)**2))
-
-                for obstacle in self.obstacle_space:
-                    distance = math.sqrt((((real_x - obstacle[0])**2) + ((real_y - obstacle[1])**2)))
-                    if distance <= 0.3:
-                        self.cost_map[col][row] = 1000
-        
-
-
 
     def callback_scan(self, msg):
         # Check to make sure not any in front obstacles at any time
