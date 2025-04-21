@@ -16,6 +16,8 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.callback_groups import ReentrantCallbackGroup
 from tf_transformations import euler_from_quaternion
 
+import numpy as np
+
 import math
 
 class GoToGoalNode(Node):
@@ -127,29 +129,38 @@ class GoToGoalNode(Node):
         self.grelper(x_index, y_index, goal_x_index, goal_y_index)
 
     # all attributes are indices
-    def grelper(self, x, y,goal_x, goal_y):
+    def grelper(self, x, y, goal_x, goal_y, visited=None):
+        if visited is None:
+            visited = set()
+        if (x, y) in visited:      # already looked at this cell
+            return
+        visited.add((x, y))
         self.point_list.append((x, y))
-        matrix = self.cost_map
-        width = len(matrix(0))
-        height = len(matrix)
-        if  x == goal_x and y==goal_y:
-            return;
-        directions = [(-1, -1), (-1, 0), (-1,1), (0, -1), (0, 1), (1, -1), (1, 0), (1,1)]
-        minimum = float('inf')
-        min_direction = None
 
-        for dx, dy in directions: 
-            tx = x + dx
-            ty = y + dy
-            if 0 <= tx < width and 0 <= ty < height:
-                if matrix [ty][tx] < minimum:
-                    minimum = matrix [ty][tx]
-                    min_direction = (dx, dy)
+        if x == goal_x and y == goal_y:
+            return
 
-        if min_direction is not None:
-            next_x = x + min_direction[0]
-            next_y = y + min_direction[1]
-            self.grelper(next_x, next_y, goal_x, goal_y)
+        cur_cost = self.cost_map[y][x]
+
+        best = None
+        best_cost = float('inf')
+        for dx, dy in [(-1,-1), (-1,0), (-1,1),
+                    ( 0,-1),         ( 0,1),
+                    ( 1,-1), ( 1,0), ( 1,1)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < self.width and 0 <= ny < self.height:
+                c = self.cost_map[ny][nx]
+                # **only move to a strictly lower cost**
+                if c < best_cost and c < cur_cost:
+                    best_cost, best = c, (nx, ny)
+
+        if best is not None:                # found a downhill neighbour
+            self.grelper(*best, goal_x, goal_y, visited)
+        else:                               # stuck on a plateau — stop
+            self.get_logger().warn(
+                f"greedy search is stuck at ({x},{y}) with cost {cur_cost}"
+            )
+
 
     # index in map to real x y
     def index_to_real(self,col,row):
@@ -168,6 +179,7 @@ class GoToGoalNode(Node):
 
     def execute_callback(self, goal_handle):
         self.get_logger().info("Executing execute_callback")
+        
 
         result = RobotGoal.Result()
         feedback = RobotGoal.Feedback()
@@ -175,21 +187,31 @@ class GoToGoalNode(Node):
         goal_y = goal_handle.request.goal_y
         goal_theta = goal_handle.request.goal_theta
 
+        self.cost_map = np.full((self.height, self.width), float('inf'))
+
+        goal_x_index, goal_y_index = self.real_to_index(goal_x, goal_y)
+        
         # create cost_map
-        for col in range(self.height):
-            for row in range(self.width):
-                real_x,real_y = self.index_to_real(col,row)
-                point = self.occupancy_grid[col + (row*self.width)]
+        for y in range(self.height):          # rows first
+            for x in range(self.width):       # columns second
+                dx = goal_x_index - x
+                dy = goal_y_index - y
+                self.cost_map[y][x] = math.hypot(dx, dy)
 
-                goal_x_index, goal_y_index = self.real_to_index(goal_x, goal_y)
+        for obstacle in self.obstacle_space:
+            real_ox, real_oy = obstacle
+            # translate obstacle position to map indices only once
+            ox, oy = self.real_to_index(real_ox, real_oy)
+            for y in range(max(0, oy-6), min(self.height, oy+7)):
+                for x in range(max(0, ox-6), min(self.width, ox+7)):
+                    if math.hypot(ox - x, oy - y) <= int(0.3 / self.resolution):
+                        self.cost_map[y][x] = 1000
 
-                self.cost_map[col][row] = int(math.sqrt((goal_x_index-row)**2) + ((goal_y_index-col)**2))
 
-                for obstacle in self.obstacle_space:
-                    distance = math.sqrt((((real_x - obstacle[0])**2) + ((real_y - obstacle[1])**2)))
-                    if distance <= 0.3:
-                        self.cost_map[col][row] = 1000
 
+        self.cost_map[goal_y_index][goal_x_index] = 0
+        
+        self.get_logger().info(str(self.cost_map))
         # Pythagorean Thrm
         distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
         self.get_logger().info("Distance from goal: " + str(distance))
@@ -229,7 +251,7 @@ class GoToGoalNode(Node):
             self.get_logger().info("Obstacle")
             distance = math.sqrt((((obstacle[0] - goal_request.goal_x)**2) + ((obstacle[1] - goal_request.goal_y)**2)))
             
-            if distance < 0.3:
+            if distance < 0.2:
                 self.get_logger().info("There is an obstacle 0.3 m away, rejecting goal")
                 return GoalResponse.REJECT
         self.get_logger().info("Goal accepted in server")
@@ -254,7 +276,7 @@ class GoToGoalNode(Node):
         self.height = msg.info.height
 
         # Map Setup
-        self.cost_map = [[0 for _ in range(self.width)] for _ in range(self.height)]
+        # self.cost_map = [[0 for _ in range(self.width)] for _ in range(self.height)]
 
         # Where is robot in map frame in col,row indices (NOT METERS!!)
         robot_x = round((self.x-self.origin_x)/self.resolution)
@@ -298,7 +320,7 @@ class GoToGoalNode(Node):
             if (scan_point <= range_min) or (scan_point >= range_max):
                 pass
             else:
-                if scan_point <= 0.7:
+                if scan_point <= 0.5:
                     # detect obstacle
                     self.obstacle = True
 
