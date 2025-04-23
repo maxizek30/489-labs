@@ -17,6 +17,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from tf_transformations import euler_from_quaternion
 
 import numpy as np
+import os
 
 import math
 
@@ -75,50 +76,87 @@ class GoToGoalNode(Node):
         # Occupancy grid
         self.occupancy_grid = None
 
+        #print map
+        self.print_map = None
+
     
     # HELPER FUNCTIONS
 
-    def go_to_waypoint(self, waypoint, goal_handle, feedback):
+    def go_to_waypoint(self, waypoint, goal_handle, feedback, result):
+        # What is close enough
+        close_enough_distance = 0.25
+        close_enough_angle = 0.2
+        slow_threshold = 1.5
+
+        # Base speeds
+        rotation_speed = 0.25
+        forward_speed = 0.4
+
+
+
         # waypoints should be real coordinates
         goal_x, goal_y = waypoint
         
         # Pythagorean Thrm
-        distance = math.sqrt((((self.x - goal_x)**2) + ((self.y - goal_y)**2)))
-        self.get_logger().info("Distance from goal: " + str(distance))
+        distance_to_goal = math.dist([goal_x,goal_y],[self.x,self.y])
+        self.get_logger().info("Distance from goal: " + str(distance_to_goal))
 
-        while distance > 0.1:
+        while distance_to_goal > close_enough_distance:
 
-            move = Twist()
+            vel = Twist()
 
-            if self.obstacle == True:
-                self.get_logger().info("Obstacle detected, cancelling goal")
-                goal_handle.canceled()
 
-            # angle we want
-            angle = round((math.atan2((goal_y - self.y),(goal_x - self.x))), 1)
+            # Calc desired angle
+            desired_angle = math.atan2(goal_y - self.y, goal_x - self.x)
+            # Calc abs val difference between current angle and desired
+            angle_dif = abs(self.ang - desired_angle)
 
-            if abs(angle - round(self.ang, 1)) > 0.2:
-                move.angular.z = 0.2
-                move.linear.x = 0.0
+             # If not close enough to desired angle
+            if angle_dif > close_enough_angle:
+                # Don't move forward
+                vel.linear.x = 0.0
+                
+                # Rotate left
+                if goal_y > self.y:
+                    vel.angular.z = -rotation_speed
+                # Rotate right
+                else:
+                    vel.angular.z = rotation_speed
+
+            # If obstacle seen, stop
+            elif self.obstacle:
+                self.get_logger().info("Obstacle!")
+                vel.linear.x = 0.0
+                vel.angular.z = 0.0
+                # Set result.success to False
+                result.success = False
+                # Exit while loop
+                goal_handle.succeed()
+                return result
+
 
             else: 
-                move.angular.z = 0.0
-                move.linear.x = 0.3 * distance;
+                vel.angular.z = 0.0
+                # If farther than slow threshold
+                if distance_to_goal > slow_threshold:
+                    # Move at base speed
+                    vel.linear.x = forward_speed
+                else: 
+                    # Move at speed relative to dist from goal
+                    vel.linear.x = forward_speed * (distance_to_goal/slow_threshold)
+            # Publish velocity
+            self.velocity_pub.publish(vel)
+
+            # Calc new distance to goal
+            distance_to_goal = math.dist([goal_x,goal_y],[self.x,self.y])
             
-            #feedback fields
-            feedback.current_x = float(self.x)
-            feedback.current_y = float(self.y)
-            feedback.current_theta = float(self.ang)
-            feedback.distance_from_goal = float(distance)
-             # Publish Feedback
+            # Publish feedback
+            feedback.current_x = float(round(self.x,2))
+            feedback.current_y = float(round(self.y,2))
+            feedback.current_theta = float(round(self.ang,2))
+            feedback.distance_from_goal = float(round(distance_to_goal,2))
             goal_handle.publish_feedback(feedback)
 
-            #publish Twist message
-            self.get_logger().info("publishing velocity. Linear x: " + str(move.linear.x) + " Angular z: " + str(move.angular.z) + "goal angle: " + str(angle))
-            self.velocity_pub.publish(move)
-           
-            #calculate new distance
-            distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
         self.get_logger().info("arrived at waypoint, moving to next point")
 
      # Greedy Algorithm
@@ -130,6 +168,7 @@ class GoToGoalNode(Node):
 
     # all attributes are indices
     def grelper(self, x, y, goal_x, goal_y, visited=None):
+        self.print_map[y][x] = '🟥'
         if visited is None:
             visited = set()
         if (x, y) in visited:      # already looked at this cell
@@ -178,8 +217,17 @@ class GoToGoalNode(Node):
     # CALLBACKS
 
     def execute_callback(self, goal_handle):
-        self.get_logger().info("Executing execute_callback")
         
+        self.get_logger().info("Executing execute_callback")
+
+        # What is close enough
+        close_enough_distance = 0.25
+        close_enough_angle = 0.2
+        slow_threshold = 1.5
+
+        # Base speeds
+        rotation_speed = 0.25
+        forward_speed = 0.4
 
         result = RobotGoal.Result()
         feedback = RobotGoal.Feedback()
@@ -207,36 +255,52 @@ class GoToGoalNode(Node):
                     if math.hypot(ox - x, oy - y) <= int(0.3 / self.resolution):
                         self.cost_map[y][x] = 1000
 
-
-
         self.cost_map[goal_y_index][goal_x_index] = 0
         
         self.get_logger().info(str(self.cost_map))
-        # Pythagorean Thrm
-        distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
-        self.get_logger().info("Distance from goal: " + str(distance))
+
+
+        self.print_map = [['⬜' for _ in range(self.width)] for _ in range(self.height)]
+
+        # get our goal points
         self.greedy(self.x, self.y, goal_x, goal_y)
+
+
+        self.write_output_file()
+    
         # go to each point
         for point in self.point_list:
-            self.go_to_waypoint(point, goal_handle, feedback)
+            self.go_to_waypoint(point, goal_handle, feedback, result)
 
-        #rotate to meet the desired goal_theta
-        range_low = goal_theta - 0.3
-        range_high = goal_theta + 0.3
-        while(self.ang > range_high or self.ang < range_low):
-            move = Twist()
-            move.angular.z = 0.2
-            move.linear.x = 0.0
-            feedback.current_x = float(self.x)
-            feedback.current_y = float(self.y)
-            feedback.current_theta = float(self.ang)
-            feedback.distance_from_goal = float(distance)
+        # Calc dif between current angle and goal angle
+        goal_angle_dif = abs(self.ang - goal_theta)
+        # While not close enough
+        while goal_angle_dif > close_enough_angle:
+            vel = Twist()
+            vel.linear.x = 0.0
+            # Rotate
+            vel.angular.z = rotation_speed
+            # Publish 
+            self.velocity_pub.publish(vel)
+
+            # Calc dif between current angle and goal angle
+            goal_angle_dif = abs(self.ang - goal_theta)
+
+            # Publish feedback
+            feedback.current_x = float(round(self.x,2))
+            feedback.current_y = float(round(self.y,2))
+            feedback.current_theta = float(round(self.ang,2))
+            feedback.distance= float(0.0)
             goal_handle.publish_feedback(feedback)
-             #publish Twist message
-            self.get_logger().info("publishing velocity. Linear x: " + str(move.linear.x) + " Angular z: " + str(move.angular.z) + "goal angle: " + str(goal_theta))
-            self.velocity_pub.publish(move)
 
-        # Save result to result
+         # Stop moving
+        vel = Twist()
+        vel.linear.x = 0.0
+        vel.angular.z = 0.0
+        # Publish
+        self.velocity_pub.publish(vel)
+
+        # Set result success to true
         result.success = True
 
         # Set status to succeed
@@ -323,6 +387,16 @@ class GoToGoalNode(Node):
                 if scan_point <= 0.5:
                     # detect obstacle
                     self.obstacle = True
+
+    def write_output_file(self):
+        try:
+            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop", "output.txt")
+            with open(desktop_path, 'w') as file:
+                for row in self.print_map:
+                    file.write(''.join(row) + '\n')
+                self.get_logger().info(f'Path written to {desktop_path}')
+        except Exception as e:
+            self.get_logger().error(f"Failed to write file: {e}")
 
 def main(args=None):
     try:
