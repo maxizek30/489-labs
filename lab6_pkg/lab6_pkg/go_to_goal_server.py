@@ -95,7 +95,7 @@ class GoToGoalNode(Node):
 
 
         # waypoints should be real coordinates
-        goal_x, goal_y = waypoint
+        goal_x, goal_y = self.index_to_real(waypoint[0], waypoint[1])
         
         # Pythagorean Thrm
         distance_to_goal = math.dist([goal_x,goal_y],[self.x,self.y])
@@ -104,8 +104,7 @@ class GoToGoalNode(Node):
         while distance_to_goal > close_enough_distance:
 
             vel = Twist()
-
-
+            
             # Calc desired angle
             desired_angle = math.atan2(goal_y - self.y, goal_x - self.x)
             # Calc abs val difference between current angle and desired
@@ -164,16 +163,18 @@ class GoToGoalNode(Node):
         goal_x_index, goal_y_index = self.real_to_index(goal_x, goal_y)
         # x and y should be indices
         x_index, y_index = self.real_to_index(x, y)
+        self.print_map[y_index][x_index] = '🟪'
+
         self.grelper(x_index, y_index, goal_x_index, goal_y_index)
 
     # all attributes are indices
     def grelper(self, x, y, goal_x, goal_y, visited=None):
-        self.print_map[y][x] = '🟥'
         if visited is None:
             visited = set()
-        if (x, y) in visited:      # already looked at this cell
+        if (x, y) in visited:    
             return
         visited.add((x, y))
+        self.print_map[y][x] = '🟥'
         self.point_list.append((x, y))
 
         if x == goal_x and y == goal_y:
@@ -190,8 +191,9 @@ class GoToGoalNode(Node):
             if 0 <= nx < self.width and 0 <= ny < self.height:
                 c = self.cost_map[ny][nx]
                 # **only move to a strictly lower cost**
-                if c < best_cost and c < cur_cost:
-                    best_cost, best = c, (nx, ny)
+                if c < best_cost:
+                    best_cost = c
+                    best = (nx, ny)
 
         if best is not None:                # found a downhill neighbour
             self.grelper(*best, goal_x, goal_y, visited)
@@ -238,7 +240,9 @@ class GoToGoalNode(Node):
         self.cost_map = np.full((self.height, self.width), float('inf'))
 
         goal_x_index, goal_y_index = self.real_to_index(goal_x, goal_y)
-        
+
+        self.print_map = [['⬜' for _ in range(self.width)] for _ in range(self.height)]
+
         # create cost_map
         for y in range(self.height):          # rows first
             for x in range(self.width):       # columns second
@@ -250,22 +254,26 @@ class GoToGoalNode(Node):
             real_ox, real_oy = obstacle
             # translate obstacle position to map indices only once
             ox, oy = self.real_to_index(real_ox, real_oy)
-            for y in range(max(0, oy-6), min(self.height, oy+7)):
-                for x in range(max(0, ox-6), min(self.width, ox+7)):
+
+            # could be an issue when determining which points are 0.3m away
+            for y in range(max(0, oy-20), min(self.height, oy+20)):
+                for x in range(max(0, ox-20), min(self.width, ox+20)):
                     if math.hypot(ox - x, oy - y) <= int(0.3 / self.resolution):
+                        self.print_map[y][x] = '🟫'
                         self.cost_map[y][x] = 1000
 
         self.cost_map[goal_y_index][goal_x_index] = 0
+       
+
+
         
-        self.get_logger().info(str(self.cost_map))
-
-
-        self.print_map = [['⬜' for _ in range(self.width)] for _ in range(self.height)]
 
         # get our goal points
         self.greedy(self.x, self.y, goal_x, goal_y)
 
-
+        x_index, y_index = self.real_to_index(self.x, self.y)
+        self.print_map[goal_y_index][goal_x_index] = '🟩'
+        self.print_map[y_index][x_index] = '🟪'
         self.write_output_file()
     
         # go to each point
@@ -290,7 +298,7 @@ class GoToGoalNode(Node):
             feedback.current_x = float(round(self.x,2))
             feedback.current_y = float(round(self.y,2))
             feedback.current_theta = float(round(self.ang,2))
-            feedback.distance= float(0.0)
+            feedback.distance_from_goal= float(0.0)
             goal_handle.publish_feedback(feedback)
 
          # Stop moving

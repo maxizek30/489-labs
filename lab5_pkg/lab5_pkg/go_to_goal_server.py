@@ -4,39 +4,36 @@ from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String
 from sensor_msgs.msg import LaserScan
 from custom_interfaces.action import RobotGoal
+from tf_transformations import euler_from_quaternion
 
 from rclpy.action import ActionServer, GoalResponse
 from rclpy.action.server import ServerGoalHandle
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException
+from rclpy.callback_groups import ReentrantCallbackGroup
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from rclpy.executors import MultiThreadedExecutor
-from rclpy.executors import ExternalShutdownException
-from rclpy.callback_groups import ReentrantCallbackGroup
-from tf_transformations import euler_from_quaternion
 
 import math
 
-class GoToGoalNode(Node):
+class MapPubNode(Node):
     def __init__(self):
-        super().__init__('w_node')
+        super().__init__('go_to_goal')
         
-        # pi
         self.PI = 3.14159265358979323846
         
-        # False until scan sees something
         self.obstacle = False
 
-        # Set by pose from pose topic
         self.x = 0
         self.y = 0
         self.ang = 0
 
-        # Robot radius
         self.robot_radius = 0.3
 
-        # Meta data from occupancy grid
+        self.obstacle_space = []
+
         self.resoltuion = 0.05 # Default 5cm
         self.width = 0
         self.height = 0
@@ -44,123 +41,30 @@ class GoToGoalNode(Node):
         self.origin_y = 0.0
         self.origin_ang = 0.0
 
-        # Subscribe to the robot position
+        self.go_to_goal = ActionServer(self, RobotGoal,"go_to_goal",goal_callback=self.goal_callback,execute_callback=self.execute_callback)
+
+        # Subscribe to the velocity unfiltered commands
         self.pos_subscriber = self.create_subscription(PoseWithCovarianceStamped, '/robot1/pose', self.callback_pos, 10)
         self.pos_subscriber
 
-        # Subscribe to the occupancy grid
+        # Subscribe to the velocity unfiltered commands
         self.map_subscriber = self.create_subscription(OccupancyGrid, '/robot1/map', self.callback_map, 10)
         self.map_subscriber
 
-        # Subscirbe to LiDAR raw data
+        # Subscirbe to scan
         self.scan_sub = self.create_subscription(LaserScan, '/robot1/scan', self.callback_scan, 10)
         self.scan_sub
 
-        # Publisher for velocity
         self.velocity_pub = self.create_publisher(Twist, '/robot1/cmd_vel', 10)
 
-        # Action server
-        self.action_server = ActionServer(self,RobotGoal,"whatever",goal_callback=self.goal_callback,execute_callback=self.execute_callback)
-
-        self.obstacle_space = []
-
-
-
-    # Goal callback
-    def goal_callback(self, goal_request):
-        self.get_logger().info("Received goal request")
-
-        for obstacle in self.obstacle_space:
-            self.get_logger().info("Obstacle")
-            # Pythagorean Thrm
-            distance = math.sqrt((((obstacle[0] - goal_request.goal_x)**2) + ((obstacle[1] - goal_request.goal_y)**2)))
-            
-            if distance < 0.3:
-                self.get_logger().info("There is an obstacle 0.3 m away, rejecting goal")
-                return GoalResponse.REJECT
-        self.get_logger().info("Goal accepted in server")
-        return GoalResponse.ACCEPT
-        
-    # Execute callback
-    def execute_callback(self, goal_handle):
-        self.get_logger().info("Executing execute_callback")
-
-        result = RobotGoal.Result()
-        feedback = RobotGoal.Feedback()
-        goal_x = goal_handle.request.goal_x
-        goal_y = goal_handle.request.goal_y
-        goal_theta = goal_handle.request.goal_theta
-
-        # Pythagorean Thrm
-        distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
-        self.get_logger().info("Distance from goal: " + str(distance))
-
-        while distance > 0.1:
-
-            move = Twist()
-
-            if self.obstacle == True:
-                self.get_logger().info("Obstacle detected, cancelling goal")
-                goal_handle.canceled()
-
-            # angle we want
-            angle = round((math.atan2((goal_y - self.y),(goal_x - self.x))), 1)
-
-            if abs(angle - round(self.ang, 1)) > 0.2:
-                move.angular.z = 0.2
-                move.linear.x = 0.0
-
-            else: 
-                move.angular.z = 0.0
-                move.linear.x = 0.3 * distance;
-            
-            #feedback fields
-            feedback.current_x = float(self.x)
-            feedback.current_y = float(self.y)
-            feedback.current_theta = float(self.ang)
-            feedback.distance_from_goal = float(distance)
-             # Publish Feedback
-            goal_handle.publish_feedback(feedback)
-
-            #publish Twist message
-            self.get_logger().info("publishing velocity. Linear x: " + str(move.linear.x) + " Angular z: " + str(move.angular.z) + "goal angle: " + str(angle))
-            self.velocity_pub.publish(move)
-           
-            #calculate new distance
-            distance = math.sqrt((((self.x - goal_handle.request.goal_x)**2) + ((self.y - goal_handle.request.goal_y)**2)))
-
-        #rotate to meet the desired goal_theta
-        range_low = goal_theta - 0.3
-        range_high = goal_theta + 0.3
-        while(self.ang > range_high or self.ang < range_low):
-            move = Twist()
-            move.angular.z = 0.2
-            move.linear.x = 0.0
-            feedback.current_x = float(self.x)
-            feedback.current_y = float(self.y)
-            feedback.current_theta = float(self.ang)
-            feedback.distance_from_goal = float(distance)
-            goal_handle.publish_feedback(feedback)
-             #publish Twist message
-            self.get_logger().info("publishing velocity. Linear x: " + str(move.linear.x) + " Angular z: " + str(move.angular.z) + "goal angle: " + str(goal_theta))
-            self.velocity_pub.publish(move)
-
-        # Save result to result
-        result.success = True
-
-        # Set status to succeed
-        goal_handle.succeed()
-        return result
-
-
-    # Callback for position
+    # Callback for pos sub
     def callback_pos(self, msg):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
-        rot_q = msg.pose.pose.orientation
-        (roll, pitch, self.ang) = euler_from_quaternion([rot_q.x, rot_q.y, rot_q.z, rot_q.w])
-        #self.ang = msg.pose.pose.orientation.z
+        quaternion = msg.pose.pose.orientation
 
+        (_,_,self.ang) = euler_from_quaternion([quaternion.x, quaternion.y, quaternion.z, quaternion.w])
+       
 
     # index in map to real x y
     def index_to_real(self,col,row):
@@ -171,23 +75,24 @@ class GoToGoalNode(Node):
     # get occupancy grid and find free, unknown, obstacle space
     def callback_map(self,msg):
         self.resolution = round(msg.info.resolution,3)
-        # The origin of the map [m, m, rad].  This is the real-world pose of the cell (0,0) in the map
+        # The origin of the map [m, m, rad].  This is the real-world pose of the  cell (0,0) in the map
         self.origin_x = msg.info.origin.position.x
         self.origin_y = msg.info.origin.position.y
         self.origin_ang = msg.info.origin.orientation.z
         
-        # How many columns (width) and rows (height)
         self.width = msg.info.width
         self.height = msg.info.height
 
-        # Where is robot in map frame in col,row indices (NOT METERS!!)
         robot_x = round((self.x-self.origin_x)/self.resolution)
         robot_y = round((self.y-self.origin_y)/self.resolution)
-        
-        # Occupancy grid data in one big list
+        # self.get_logger().info(str(robot_x) + ", " + str(robot_y) + ", " + str(self.ang*180/self.PI)) 
+
+        robot_ang = round((self.ang - self.origin_ang)*180/self.PI,4)
+
         occupancy_grid = msg.data
 
-        # Empty lists to add obstacles to
+        self.free_space = []
+        self.unknown_space = []
         self.obstacle_space = []
         
         row = 0
@@ -196,16 +101,19 @@ class GoToGoalNode(Node):
             while col < self.width:
                 real_x,real_y = self.index_to_real(col,row)
                 point = occupancy_grid[col + (row*self.width)]
-
-                if point > 25:
-                    self.obstacle_space.append((real_x, real_y))
-
+                if (col == robot_x and row == robot_y):
+                    pass
+                elif point == -1:
+                    self.unknown_space.append([real_x,real_y]) 
+                elif point == 0:
+                    self.free_space.append([real_x,real_y])    
+                else:
+                    self.obstacle_space.append([real_x,real_y])         
                 col += 1
             row += 1
 
+
     def callback_scan(self, msg):
-        # Check to make sure not any in front obstacles at any time
-        ## NOTE: this is not our obstacle avoidance, this is still jsut stop if obstacle
         range_min = msg.range_min
         range_max = msg.range_max
 
@@ -221,21 +129,153 @@ class GoToGoalNode(Node):
             if (scan_point <= range_min) or (scan_point >= range_max):
                 pass
             else:
-                if scan_point <= 0.7:
+                if scan_point <= 0.75:
                     # detect obstacle
                     self.obstacle = True
+                    #self.get_logger().info("Obstacle detected!")
 
-def main(args=None):
+    # Goal callback
+    def goal_callback(self, goal_request):
+        goal = [goal_request.goal_x,goal_request.goal_y]
+        min_distance = 10000
+
+        for obstacle in self.obstacle_space:
+            distance = math.dist(goal,obstacle)
+            if distance < min_distance:
+                min_distance = distance
+
+        if min_distance < self.robot_radius:
+            self.get_logger().info("Rejected")
+            return GoalResponse.REJECT
+        
+        self.get_logger().info("Accepted goal!")
+        return GoalResponse.ACCEPT
+    
+    def execute_callback(self, goal_handle):
+        goal_x = goal_handle.request.goal_x
+        goal_y = goal_handle.request.goal_y
+        goal_theta = goal_handle.request.goal_theta
+        result = RobotGoal.Result()
+        feedback = RobotGoal.Feedback()
+
+        # What is close enough
+        close_enough_distance = 0.25
+        close_enough_angle = 0.2
+        slow_threshold = 1.5
+
+        # Base speeds
+        rotation_speed = 0.25
+        forward_speed = 0.4
+
+        # Get initial distance
+        distance_to_goal = math.dist([goal_x,goal_y],[self.x,self.y])
+
+        # While not close enough
+        while distance_to_goal > close_enough_distance:
+            # New velocity msg
+            vel = Twist()
+
+            # Calc desired angle
+            desired_angle = math.atan2(goal_y - self.y, goal_x - self.x)
+            # Calc abs val difference between current angle and desired
+            angle_dif = abs(self.ang - desired_angle)
+
+            # If not close enough to desired angle
+            if angle_dif > close_enough_angle:
+                # Don't move forward
+                vel.linear.x = 0.0
+                
+                # Rotate left
+                if goal_y > self.y:
+                    vel.angular.z = -rotation_speed
+                # Rotate right
+                else:
+                    vel.angular.z = rotation_speed
+
+            # If obstacle seen, stop
+            elif self.obstacle:
+                self.get_logger().info("Obstacle!")
+                vel.linear.x = 0.0
+                vel.angular.z = 0.0
+                # Set result.success to False
+                result.success = False
+                # Exit while loop
+                goal_handle.succeed()
+                return result
+            
+            else: 
+                vel.angular.z = 0.0
+                # If farther than slow threshold
+                if distance_to_goal > slow_threshold:
+                    # Move at base speed
+                    vel.linear.x = forward_speed
+                else: 
+                    # Move at speed relative to dist from goal
+                    vel.linear.x = forward_speed * (distance_to_goal/slow_threshold)
+            # Publish velocity
+            self.velocity_pub.publish(vel)
+
+            # Calc new distance to goal
+            distance_to_goal = math.dist([goal_x,goal_y],[self.x,self.y])
+
+            # Publish feedback
+            feedback.current_x = float(round(self.x,2))
+            feedback.current_y = float(round(self.y,2))
+            feedback.current_theta = float(round(self.ang,2))
+            feedback.distance = float(round(distance_to_goal,2))
+            goal_handle.publish_feedback(feedback)
+
+        # Calc dif between current angle and goal angle
+        goal_angle_dif = abs(self.ang - goal_theta)
+        # While not close enough
+        while goal_angle_dif > close_enough_angle:
+            vel = Twist()
+            vel.linear.x = 0.0
+            # Rotate
+            vel.angular.z = rotation_speed
+            # Publish 
+            self.velocity_pub.publish(vel)
+
+            # Calc dif between current angle and goal angle
+            goal_angle_dif = abs(self.ang - goal_theta)
+
+            # Publish feedback
+            feedback.current_x = float(round(self.x,2))
+            feedback.current_y = float(round(self.y,2))
+            feedback.current_theta = float(round(self.ang,2))
+            feedback.distance= float(round(distance_to_goal,2))
+            goal_handle.publish_feedback(feedback)
+
+        # Stop moving
+        vel = Twist()
+        vel.linear.x = 0.0
+        vel.angular.z = 0.0
+        # Publish
+        self.velocity_pub.publish(vel)
+
+        # Set result success to true
+        result.success = True
+        # Set status to succeed
+        goal_handle.succeed()
+        # Return result
+        return result
+
+
+def main(args=None): 
+
     try:
-        rclpy.init(args=args)
-        node = GoToGoalNode()
+        rclpy.init(args=None)
+        node = MapPubNode()
+
         # Use a MultiThreadedExecutor to enable processing goals concurrently
         executor = MultiThreadedExecutor()
+
         rclpy.spin(node, executor=executor)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
-        node.destroy_node()
-        rclpy.shutdown()
+   
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
