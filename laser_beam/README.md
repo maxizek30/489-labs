@@ -5,7 +5,7 @@
 ### Part 1 Navigate the maze
 
 - Mark entrance as a wall in occupancy grid
-- (DFS) Move until intersection -> go in first direction we see (mark visited cells)
+  <strike>- dead (DFS) Move until intersection -> go in first direction we see (mark visited cells)</strike>
   - We will detect an intersection by scanning left and right by some amount (determined through testing) and if we detect free space then we will add that direction into out stack.
 - Once we reach a deadend -> backtrack to the last intersection on the stack -> explore unexplored directions.
 - If we find exit (distance we see > max distance) mark as exit, but keep exploring if we have not explored the whole maze.

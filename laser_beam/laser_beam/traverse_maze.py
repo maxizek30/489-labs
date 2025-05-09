@@ -15,6 +15,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+import numpy as np
 
 import math
 
@@ -52,8 +53,8 @@ class MapPubNode(Node):
 
         # Subscirbe to scan
         self.scan_sub = self.create_subscription(LaserScan, '/robot1/scan', self.callback_scan, 10)
-        self.scan_sub
 
+        # publish vel
         self.velocity_pub = self.create_publisher(Twist, '/robot1/cmd_vel', 10)
 
     # Callback for pos sub
@@ -63,7 +64,9 @@ class MapPubNode(Node):
         quaternion = msg.pose.pose.orientation
 
         (_,_,self.ang) = euler_from_quaternion([quaternion.x, quaternion.y, quaternion.z, quaternion.w])
-       
+
+        self.dx = round(math.cos(self.ang))
+        self.dy = round(math.cos(self.ang))
 
     # index in map to real x y
     def index_to_real(self,col,row):
@@ -93,6 +96,11 @@ class MapPubNode(Node):
         self.free_space = []
         self.unknown_space = []
         self.obstacle_space = []
+
+        # occupancy grid (2d list)
+        occupancy_grid_np = np.array(occupancy_grid)
+        occupancy_grid_np.reshape(self.width, self.height)
+        self.grid  = occupancy_grid_np
         
         row = 0
         while row < self.height:
@@ -134,15 +142,76 @@ class MapPubNode(Node):
                     #self.get_logger().info("Obstacle detected!")
 
     def start(self):
-        # call dfs
-        # go to exit
-    def dfs(self):
-        
+        # while true
+        while True:
+            # if left clear, turn left
+            if self.check_left():
+                # turn left
+                self.turn('left')
+                return #TODO: implement
+            # elif front clear, move forward
+            elif self.check_front():
+                # go
+                return #TODO: implement
+            # else turn right (maybe 180)
+            elif self.check_right():
+                # turn right
+                self.turn('right')
+                return #TODO: implement
+        return
 
+    def check_left(self):
+        left_dx = -self.dy
+        left_dy = self.dx
 
+        gx, gy = self.real_to_index(self.x, self.y)
+
+        left_gx = gx + left_dx
+        left_gy = gy + left_dy
+
+        return not self.is_occupied(left_gx, left_gy)
+
+    def check_front(self):
+        front_dx = self.dx
+        front_dy = self.dy
+
+        gx, gy = self.real_to_index(self.x, self.y)
+
+        front_gx = gx + front_dx
+        front_gy = gy + front_dy
+
+        return not self.is_occupied(front_gx, front_gy)
     
-    
+    def check_right(self):
+        right_dx = self.dy
+        right_dy = -self.dx
 
+        gx, gy = self.real_to_index(self.x, self.y)
+
+        right_gx = gx + right_dx
+        right_gy = gy + right_dy
+
+        return not self.is_occupied(right_gx, right_gy)
+    
+    # real x and y to index in map
+    def real_to_index(self,real_x, real_y):
+        index_x = round((real_x-self.origin_x)/self.resolution)
+        index_y = round((real_y-self.origin_y)/self.resolution)
+        return index_x, index_y
+    
+    # check if obstacle
+    def is_occupied(self, x, y):
+        if x < 0 or y < 0 or x >= self.width or y >= self.height:
+            return True
+        return self.grid[y][x] >= 30
+
+    def turn(self, type):
+        if type == 'left':
+            # turn left
+            return
+        elif type == 'right':
+            # turn right
+            return
 
 def main(args=None): 
 
