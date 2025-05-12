@@ -15,16 +15,16 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+import time
 import numpy as np
-
 import math
 
 class MapPubNode(Node):
     def __init__(self):
         super().__init__('taehyung_node')
-        
-        self.PI = 3.14159265358979323846
-        
+        self.callback_group = ReentrantCallbackGroup()
+
+        self.PI = math.pi
         self.obstacle = False
 
         self.x = 0
@@ -32,202 +32,181 @@ class MapPubNode(Node):
         self.ang = 0
 
         self.robot_radius = 0.3
-
         self.obstacle_space = []
-
-        self.resoltuion = 0.05 # Default 5cm
+        self.resolution = 0.05
         self.width = 0
         self.height = 0
         self.origin_x = 0.0
         self.origin_y = 0.0
         self.origin_ang = 0.0
+        self.dx = 0.0
+        self.dy = 0.0
 
+        self.pos_subscriber = self.create_subscription(
+            PoseWithCovarianceStamped, '/robot1/pose', self.callback_pos, 10, callback_group=self.callback_group)
 
-        # Subscribe to the velocity unfiltered commands
-        self.pos_subscriber = self.create_subscription(PoseWithCovarianceStamped, '/robot1/pose', self.callback_pos, 10)
-        self.pos_subscriber
+        self.map_subscriber = self.create_subscription(
+            OccupancyGrid, '/robot1/map', self.callback_map, 10, callback_group=self.callback_group)
 
-        # Subscribe to the velocity unfiltered commands
-        self.map_subscriber = self.create_subscription(OccupancyGrid, '/robot1/map', self.callback_map, 10)
-        self.map_subscriber
+        self.scan_sub = self.create_subscription(
+            LaserScan, '/robot1/scan', self.callback_scan, 10, callback_group=self.callback_group)
 
-        # Subscirbe to scan
-        self.scan_sub = self.create_subscription(LaserScan, '/robot1/scan', self.callback_scan, 10)
-
-        # publish vel
         self.velocity_pub = self.create_publisher(Twist, '/robot1/cmd_vel', 10)
 
-    # Callback for pos sub
+        self.create_timer(1.0, self.start, callback_group=self.callback_group)
+
     def callback_pos(self, msg):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         quaternion = msg.pose.pose.orientation
-
-        (_,_,self.ang) = euler_from_quaternion([quaternion.x, quaternion.y, quaternion.z, quaternion.w])
-
+        (_, _, self.ang) = euler_from_quaternion([quaternion.x, quaternion.y, quaternion.z, quaternion.w])
         self.dx = round(math.cos(self.ang))
-        self.dy = round(math.cos(self.ang))
+        self.dy = round(math.sin(self.ang))
 
-    # index in map to real x y
-    def index_to_real(self,col,row):
-        real_x = round((col*self.resolution) + self.origin_x,2)
-        real_y = round((row*self.resoltuion) + self.origin_y,2)
-        return real_x,real_y
+    def index_to_real(self, col, row):
+        real_x = round((col * self.resolution) + self.origin_x, 2)
+        real_y = round((row * self.resolution) + self.origin_y, 2)
+        return real_x, real_y
 
-    # get occupancy grid and find free, unknown, obstacle space
-    def callback_map(self,msg):
-        self.resolution = round(msg.info.resolution,3)
-        # The origin of the map [m, m, rad].  This is the real-world pose of the  cell (0,0) in the map
+    def callback_map(self, msg):
+        self.resolution = round(msg.info.resolution, 3)
         self.origin_x = msg.info.origin.position.x
         self.origin_y = msg.info.origin.position.y
         self.origin_ang = msg.info.origin.orientation.z
-        
+
         self.width = msg.info.width
         self.height = msg.info.height
-
-        robot_x = round((self.x-self.origin_x)/self.resolution)
-        robot_y = round((self.y-self.origin_y)/self.resolution)
-        # self.get_logger().info(str(robot_x) + ", " + str(robot_y) + ", " + str(self.ang*180/self.PI)) 
-
-        robot_ang = round((self.ang - self.origin_ang)*180/self.PI,4)
-
         occupancy_grid = msg.data
 
         self.free_space = []
         self.unknown_space = []
         self.obstacle_space = []
 
-        # occupancy grid (2d list)
         occupancy_grid_np = np.array(occupancy_grid)
-        occupancy_grid_np.reshape(self.width, self.height)
-        self.grid  = occupancy_grid_np
-        
-        row = 0
-        while row < self.height:
-            col = 0
-            while col < self.width:
-                real_x,real_y = self.index_to_real(col,row)
-                point = occupancy_grid[col + (row*self.width)]
-                if (col == robot_x and row == robot_y):
-                    pass
-                elif point == -1:
-                    self.unknown_space.append([real_x,real_y]) 
-                elif point == 0:
-                    self.free_space.append([real_x,real_y])    
-                else:
-                    self.obstacle_space.append([real_x,real_y])         
-                col += 1
-            row += 1
+        self.grid = occupancy_grid_np.reshape((self.height, self.width))
+        print(self.grid)
 
+        for row in range(self.height):
+            for col in range(self.width):
+                real_x, real_y = self.index_to_real(col, row)
+                point = occupancy_grid[col + (row * self.width)]
+                if point == -1:
+                    self.unknown_space.append([real_x, real_y])
+                elif point == 0:
+                    self.free_space.append([real_x, real_y])
+                else:
+                    self.obstacle_space.append([real_x, real_y])
 
     def callback_scan(self, msg):
         range_min = msg.range_min
         range_max = msg.range_max
-
         self.obstacle = False
-        
-        # front range is a:b (total range is 0:1080)
-        a = 200
-        b = 340
-
-        for angle in range(a,b):
+        for angle in range(200, 340):
             scan_point = msg.ranges[angle]
-            
-            if (scan_point <= range_min) or (scan_point >= range_max):
-                pass
-            else:
-                if scan_point <= 0.75:
-                    # detect obstacle
-                    self.obstacle = True
-                    #self.get_logger().info("Obstacle detected!")
+            if range_min < scan_point < range_max and scan_point <= 0.75:
+                self.obstacle = True
+                break
 
     def start(self):
-        # while true
-        while True:
-            # if left clear, turn left
+        print("started")
+        while(1):
             if self.check_left():
-                # turn left
+                print("turning left")
                 self.turn('left')
-                return #TODO: implement
-            # elif front clear, move forward
             elif self.check_front():
-                # go
-                return #TODO: implement
-            # else turn right (maybe 180)
+                print("moving forward")
+                self.move_forward()
             elif self.check_right():
-                # turn right
+                print("turning right")
                 self.turn('right')
-                return #TODO: implement
-        return
 
     def check_left(self):
-        left_dx = -self.dy
-        left_dy = self.dx
-
+        left_dx = -self.dy * 4
+        left_dy = self.dx * 4
         gx, gy = self.real_to_index(self.x, self.y)
-
-        left_gx = gx + left_dx
-        left_gy = gy + left_dy
-
-        return not self.is_occupied(left_gx, left_gy)
+        return not self.is_occupied(gx + left_dx, gy + left_dy)
 
     def check_front(self):
-        front_dx = self.dx
-        front_dy = self.dy
-
         gx, gy = self.real_to_index(self.x, self.y)
+        return not self.is_occupied(gx + self.dx, gy + self.dy)
 
-        front_gx = gx + front_dx
-        front_gy = gy + front_dy
-
-        return not self.is_occupied(front_gx, front_gy)
-    
     def check_right(self):
-        right_dx = self.dy
-        right_dy = -self.dx
-
+        right_dx = self.dy * 4
+        right_dy = -self.dx * 4
         gx, gy = self.real_to_index(self.x, self.y)
+        return not self.is_occupied(gx + right_dx, gy + right_dy)
 
-        right_gx = gx + right_dx
-        right_gy = gy + right_dy
+    def real_to_index(self, real_x, real_y):
+        return int((real_x - self.origin_x) / self.resolution), int((real_y - self.origin_y) / self.resolution)
 
-        return not self.is_occupied(right_gx, right_gy)
-    
-    # real x and y to index in map
-    def real_to_index(self,real_x, real_y):
-        index_x = round((real_x-self.origin_x)/self.resolution)
-        index_y = round((real_y-self.origin_y)/self.resolution)
-        return index_x, index_y
-    
-    # check if obstacle
     def is_occupied(self, x, y):
+        x = int(x)
+        y = int(y)
         if x < 0 or y < 0 or x >= self.width or y >= self.height:
             return True
+        print(f'x: {x} y: {y}')
         return self.grid[y][x] >= 30
 
+    def normalize_angle(self, angle):
+        while angle > self.PI:
+            angle -= 2 * self.PI
+        while angle < -self.PI:
+            angle += 2 * self.PI
+        return angle
+
+    def angle_reached(self, current, target, direction):
+        current = self.normalize_angle(current)
+        target = self.normalize_angle(target)
+        if direction == 'left':
+            return current >= target if target > current else current >= target or current < -self.PI/2
+        else:
+            return current <= target if target < current else current <= target or current > self.PI/2
+
     def turn(self, type):
+        twist = Twist()
+        angular_speed = 0.5  # rad/s — tune this for your robot
+        duration = self.PI / 2 / abs(angular_speed)  # Time to turn 90°
+
         if type == 'left':
-            # turn left
-            return
+            twist.angular.z = angular_speed
         elif type == 'right':
-            # turn right
+            twist.angular.z = -angular_speed
+        else:
             return
 
-def main(args=None): 
+        # Start rotating
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            self.velocity_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.01)
 
+        # Stop
+        twist.angular.z = 0.0
+        self.velocity_pub.publish(twist)
+
+
+    def move_forward(self, distance=0.3, speed=0.1):
+        twist = Twist()
+        twist.linear.x = speed
+        duration = distance / speed
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            self.velocity_pub.publish(twist)
+            rclpy.spin_once(self, timeout_sec=0.01)
+        twist.linear.x = 0.0
+        self.velocity_pub.publish(twist)
+
+def main(args=None):
     try:
-        rclpy.init(args=None)
+        rclpy.init(args=args)
         node = MapPubNode()
-
-        # Use a MultiThreadedExecutor to enable processing goals concurrently
         executor = MultiThreadedExecutor()
-
         rclpy.spin(node, executor=executor)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
-   
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
