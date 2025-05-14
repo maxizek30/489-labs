@@ -18,6 +18,8 @@ from rclpy.qos import qos_profile_sensor_data
 import time
 import numpy as np
 import math
+import os
+
 
 class MapPubNode(Node):
     def __init__(self):
@@ -41,6 +43,8 @@ class MapPubNode(Node):
         self.origin_ang = 0.0
         self.dx = 0.0
         self.dy = 0.0
+
+        self.grid = []
 
         self.pos_subscriber = self.create_subscription(
             PoseWithCovarianceStamped, '/robot1/pose', self.callback_pos, 10, callback_group=self.callback_group)
@@ -84,7 +88,7 @@ class MapPubNode(Node):
 
         occupancy_grid_np = np.array(occupancy_grid)
         self.grid = occupancy_grid_np.reshape((self.height, self.width))
-        print(self.grid)
+        
 
         for row in range(self.height):
             for col in range(self.width):
@@ -109,16 +113,18 @@ class MapPubNode(Node):
 
     def start(self):
         print("started")
-        while(1):
-            if self.check_left():
-                print("turning left")
-                self.turn('left')
-            elif self.check_front():
-                print("moving forward")
-                self.move_forward()
-            elif self.check_right():
-                print("turning right")
-                self.turn('right')
+        
+        if self.check_left():
+            print("turning left")
+                # self.turn('left')
+            # elif self.check_front():
+            #     print("moving forward")
+            #     self.move_forward()
+            # elif self.check_right():
+            #     print("turning right")
+            #     self.turn('right')
+    
+
 
     def check_left(self):
         left_dx = -self.dy * 4
@@ -144,6 +150,12 @@ class MapPubNode(Node):
         y = int(y)
         if x < 0 or y < 0 or x >= self.width or y >= self.height:
             return True
+        copy = self.grid
+        copy[y][x] = -2
+        gx, gy = self.real_to_index(self.x, self.y)
+        copy[gy][gx] = -3
+
+        self.save_grid_to_file(copy)
         print(f'x: {x} y: {y}')
         return self.grid[y][x] >= 30
 
@@ -195,6 +207,28 @@ class MapPubNode(Node):
             rclpy.spin_once(self, timeout_sec=0.01)
         twist.linear.x = 0.0
         self.velocity_pub.publish(twist)
+    
+    # maxizek30
+    def save_grid_to_file(self, map):
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop", "output.txt")
+        # Map values to emojis: -1 (unknown): 🟦, 0 (free): ⬜, >=30 (occupied): 🟥, else: ⬛
+        def cell_to_emoji(cell):
+            if cell == -1:
+                return "🟦"
+            elif cell == 0:
+                return "⬜"
+            elif cell >= 30:
+                return "🟥"
+            elif cell == -2:
+                return "🟩"
+            elif cell == -3:
+                return "🟫"
+            else:
+                return "⬛"
+
+        with open(desktop_path, "w") as f:
+            for row in map:
+                f.write("".join(cell_to_emoji(cell) for cell in row) + "\n")
 
 def main(args=None):
     try:
