@@ -4,7 +4,10 @@ from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String
 from sensor_msgs.msg import LaserScan
 from custom_interfaces.action import RobotGoal
-from tf_transformations import euler_from_quaternion
+import cv2
+from cv_bridge import CvBridge as cvb
+from sensor_msgs.msg import Image
+from pyzbar.pyzbar import decode
 
 from rclpy.action import ActionServer, GoalResponse
 from rclpy.action.server import ServerGoalHandle
@@ -43,6 +46,7 @@ class MapPubNode(Node):
         self.origin_ang = 0.0
         self.dx = 0.0
         self.dy = 0.0
+        self.red_detected = False
 
         self.grid = []
 
@@ -59,14 +63,66 @@ class MapPubNode(Node):
 
         self.create_timer(1.0, self.start, callback_group=self.callback_group)
 
+        self.cam_sub = self.create_subscription(Image, "/robot1/oakd/rgb/preview/image_raw", self.cam_callback, 10)
+        self.bridge = cvb()
+        
     def callback_pos(self, msg):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         quaternion = msg.pose.pose.orientation
-        (_, _, self.ang) = euler_from_quaternion([quaternion.x, quaternion.y, quaternion.z, quaternion.w])
+        (_, _, self.ang) = self.quaternion_to_euler(quaternion.x, quaternion.y, quaternion.z, quaternion.w)
         self.dx = round(math.cos(self.ang))
         self.dy = round(math.sin(self.ang))
+    def cam_callback(self, msg):
+        print("in cam callback")
+        try:
+            #stuff
+            print("in cam try block")
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            cv2.imshow("Camera feed", cv_image)
+            cv2.waitKey(1)
+            hsv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
 
+
+            # ranges
+            upper_range1 = (10,255,255)
+            lower_range1 = (0,100,100)
+            upper_range2 = (180,255,255)
+            lower_range2 = (160,100,100)
+            mask1 = cv2.inRange(hsv_image, lower_range1, upper_range1)
+            mask2 = cv2.inRange(hsv_image, lower_range2, upper_range2)
+
+            mask = cv2.bitwise_or(mask1, mask2)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            height, width = hsv_image.shape[:2]
+            area_threshold = 0.20 * (height * width)
+
+            flag = False
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area > area_threshold:
+                    flag = True
+            if flag:
+                self.red_detected = True
+            else: 
+                self.red_detected = False
+
+            barcodes = decode(cv_image)
+            if barcodes:
+                for barcode in barcodes:
+                    (x,y,w,h) = barcode.rect
+                    data = barcode.data.decode("utf-8")
+                    
+                    if data in self.qr_codes:
+                        continue
+                    if w == 0:
+                        continue
+
+  
+
+        except Exception as e:
+            self.get_logger().error(f"Failed to process: {e}")
     def index_to_real(self, col, row):
         real_x = round((col * self.resolution) + self.origin_x, 2)
         real_y = round((row * self.resolution) + self.origin_y, 2)
@@ -113,9 +169,24 @@ class MapPubNode(Node):
 
     def start(self):
         print("started")
-        
-        if self.check_left():
-            print("turning left")
+        twist = Twist()
+        while True:
+            if self.check_left():
+                print("left opengo")
+                twist.linear.x = 0.0
+            elif (self.check_front()):
+                twist.linear.x = 0.4
+                print("front open")
+            elif self.check_right():
+                twist.linear.x = 0.0
+                print("right open")
+
+            if self.red_detected:
+                print("stopping red detected")
+                twist.linear.x = 0.0
+                
+            self.velocity_pub.publish(twist)
+
                 # self.turn('left')
             # elif self.check_front():
             #     print("moving forward")
@@ -127,18 +198,20 @@ class MapPubNode(Node):
 
 
     def check_left(self):
-        left_dx = -self.dy * 4
-        left_dy = self.dx * 4
+        left_dx = -self.dy * 26
+        left_dy = self.dx * 26
         gx, gy = self.real_to_index(self.x, self.y)
         return not self.is_occupied(gx + left_dx, gy + left_dy)
 
     def check_front(self):
         gx, gy = self.real_to_index(self.x, self.y)
-        return not self.is_occupied(gx + self.dx, gy + self.dy)
+        front_dx = self.dx * 12
+        front_dy = self.dy * 12
+        return not self.is_occupied(gx + front_dx, gy + front_dy)
 
     def check_right(self):
-        right_dx = self.dy * 4
-        right_dy = -self.dx * 4
+        right_dx = self.dy * 26
+        right_dy = -self.dx * 26
         gx, gy = self.real_to_index(self.x, self.y)
         return not self.is_occupied(gx + right_dx, gy + right_dy)
 
@@ -229,6 +302,26 @@ class MapPubNode(Node):
         with open(desktop_path, "w") as f:
             for row in map:
                 f.write("".join(cell_to_emoji(cell) for cell in row) + "\n")
+
+    def quaternion_to_euler(self, x, y, z, w):
+        # Roll (x-axis rotation)
+        t0 = +2.0 * (w * x + y * z)
+        t1 = +1.0 - 2.0 * (x * x + y * y)
+        roll = math.atan2(t0, t1)
+
+        # Pitch (y-axis rotation)
+        t2 = +2.0 * (w * y - z * x)
+        t2 = +1.0 if t2 > +1.0 else t2
+        t2 = -1.0 if t2 < -1.0 else t2
+        pitch = math.asin(t2)
+
+        # Yaw (z-axis rotation)
+        t3 = +2.0 * (w * z + x * y)
+        t4 = +1.0 - 2.0 * (y * y + z * z)
+        yaw = math.atan2(t3, t4)
+
+        return roll, pitch, yaw
+
 
 def main(args=None):
     try:
