@@ -7,7 +7,6 @@ from custom_interfaces.action import RobotGoal
 import cv2
 from cv_bridge import CvBridge as cvb
 from sensor_msgs.msg import Image
-from pyzbar.pyzbar import decode
 
 from rclpy.action import ActionServer, GoalResponse
 from rclpy.action.server import ServerGoalHandle
@@ -61,12 +60,16 @@ class MapPubNode(Node):
 
         self.velocity_pub = self.create_publisher(Twist, '/robot1/cmd_vel', 10)
 
+        self.cam_sub = self.create_subscription(Image, "/robot1/oakd/rgb/preview/image_raw", self.cam_callback, 10, callback_group=self.callback_group)
+        self.bridge = cvb()
+
+        # Wait 1 second before starting
+        self.count = 0
         self.create_timer(1.0, self.start, callback_group=self.callback_group)
 
-        self.cam_sub = self.create_subscription(Image, "/robot1/oakd/rgb/preview/image_raw", self.cam_callback, 10)
-        self.bridge = cvb()
-        
+       
     def callback_pos(self, msg):
+        self.get_logger().info("getting position")
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         quaternion = msg.pose.pose.orientation
@@ -74,10 +77,8 @@ class MapPubNode(Node):
         self.dx = round(math.cos(self.ang))
         self.dy = round(math.sin(self.ang))
     def cam_callback(self, msg):
-        print("in cam callback")
         try:
             #stuff
-            print("in cam try block")
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             cv2.imshow("Camera feed", cv_image)
             cv2.waitKey(1)
@@ -108,18 +109,12 @@ class MapPubNode(Node):
             else: 
                 self.red_detected = False
 
-            barcodes = decode(cv_image)
-            if barcodes:
-                for barcode in barcodes:
-                    (x,y,w,h) = barcode.rect
-                    data = barcode.data.decode("utf-8")
-                    
-                    if data in self.qr_codes:
-                        continue
-                    if w == 0:
-                        continue
-
-  
+            # barcodes = decode(cv_image)
+            # if barcodes:
+            #     for barcode in barcodes:
+            #         (x,y,w,h) = barcode.rect
+            #         data = barcode.data.decode("utf-8")
+            #         code_type = barcode.type
 
         except Exception as e:
             self.get_logger().error(f"Failed to process: {e}")
@@ -168,50 +163,71 @@ class MapPubNode(Node):
                 break
 
     def start(self):
-        print("started")
+        if self.count == 1:
+            return
+        self.count = 1
+        self.get_logger().info("started")
         twist = Twist()
+        
         while True:
             if self.check_left():
-                print("left opengo")
+                self.get_logger().info("left open")
                 twist.linear.x = 0.0
-            elif (self.check_front()):
+                # move forward
+                self.move_forward(3)
+                #turn left
+                self.turn('left')
+                self.move_forward(6)
+            elif self.check_front():
                 twist.linear.x = 0.4
-                print("front open")
+                self.get_logger().info("front open")
             elif self.check_right():
+                self.get_logger().info("right open")
                 twist.linear.x = 0.0
-                print("right open")
+                # move forward
+                self.move_forward(3)
+                #turn right
+                self.turn('right')
+                self.move_forward(6)
+
+            else:
+                self.get_logger().info("nothing open")
 
             if self.red_detected:
-                print("stopping red detected")
+                self.get_logger().info("stopping red detected")
                 twist.linear.x = 0.0
-                
+                    
             self.velocity_pub.publish(twist)
+            time.sleep(1)
 
                 # self.turn('left')
             # elif self.check_front():
-            #     print("moving forward")
+            #     self.get_logger().info("moving forward")
             #     self.move_forward()
             # elif self.check_right():
-            #     print("turning right")
+            #     self.get_logger().info("turning right")
             #     self.turn('right')
     
 
 
     def check_left(self):
-        left_dx = -self.dy * 26
-        left_dy = self.dx * 26
+        self.get_logger().info("checking left")
+        left_dx = -self.dy * 14
+        left_dy = self.dx * 14
         gx, gy = self.real_to_index(self.x, self.y)
         return not self.is_occupied(gx + left_dx, gy + left_dy)
 
     def check_front(self):
+        self.get_logger().info("checking front")
         gx, gy = self.real_to_index(self.x, self.y)
-        front_dx = self.dx * 12
-        front_dy = self.dy * 12
+        front_dx = self.dx * 10
+        front_dy = self.dy * 10
         return not self.is_occupied(gx + front_dx, gy + front_dy)
 
     def check_right(self):
-        right_dx = self.dy * 26
-        right_dy = -self.dx * 26
+        self.get_logger().info("checking left")
+        right_dx = self.dy * 14
+        right_dy = -self.dx * 14
         gx, gy = self.real_to_index(self.x, self.y)
         return not self.is_occupied(gx + right_dx, gy + right_dy)
 
@@ -221,16 +237,17 @@ class MapPubNode(Node):
     def is_occupied(self, x, y):
         x = int(x)
         y = int(y)
+        self.get_logger().info(f'x: {x} y: {y}')
         if x < 0 or y < 0 or x >= self.width or y >= self.height:
             return True
-        copy = self.grid
+        copy = self.grid.copy()
+        copy = [row.copy() for row in copy]
         copy[y][x] = -2
         gx, gy = self.real_to_index(self.x, self.y)
         copy[gy][gx] = -3
-
+        self.get_logger().info("saving grid")
         self.save_grid_to_file(copy)
-        print(f'x: {x} y: {y}')
-        return self.grid[y][x] >= 30
+        return self.grid[y][x] >= 30 or self.grid[y][x] == -1
 
     def normalize_angle(self, angle):
         while angle > self.PI:
@@ -270,17 +287,18 @@ class MapPubNode(Node):
         self.velocity_pub.publish(twist)
 
 
-    def move_forward(self, distance=0.3, speed=0.1):
+    def move_forward(self, duration, speed=0.5):
         twist = Twist()
         twist.linear.x = speed
-        duration = distance / speed
-        start_time = time.time()
-        while time.time() - start_time < duration:
+        i = 0
+        while i < duration:
             self.velocity_pub.publish(twist)
-            rclpy.spin_once(self, timeout_sec=0.01)
+            i = i + 1
+            time.sleep(1)
+        
         twist.linear.x = 0.0
         self.velocity_pub.publish(twist)
-    
+
     # maxizek30
     def save_grid_to_file(self, map):
         desktop_path = os.path.join(os.path.expanduser("~"), "Desktop", "output.txt")
@@ -328,6 +346,7 @@ def main(args=None):
         rclpy.init(args=args)
         node = MapPubNode()
         executor = MultiThreadedExecutor()
+   
         rclpy.spin(node, executor=executor)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
