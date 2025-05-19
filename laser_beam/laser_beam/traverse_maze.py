@@ -48,6 +48,7 @@ class MapPubNode(Node):
         self.red_detected = False
 
         self.grid = []
+        self.left = False
 
         self.pos_subscriber = self.create_subscription(
             PoseWithCovarianceStamped, '/robot1/pose', self.callback_pos, 10, callback_group=self.callback_group)
@@ -67,6 +68,9 @@ class MapPubNode(Node):
         self.count = 0
         self.create_timer(1.0, self.start, callback_group=self.callback_group)
 
+        #output counts
+        self.outputNum = 0
+
        
     def callback_pos(self, msg):
         self.get_logger().info("getting position")
@@ -76,6 +80,7 @@ class MapPubNode(Node):
         (_, _, self.ang) = self.quaternion_to_euler(quaternion.x, quaternion.y, quaternion.z, quaternion.w)
         self.dx = round(math.cos(self.ang))
         self.dy = round(math.sin(self.ang))
+
     def cam_callback(self, msg):
         try:
             #stuff
@@ -83,7 +88,6 @@ class MapPubNode(Node):
             cv2.imshow("Camera feed", cv_image)
             cv2.waitKey(1)
             hsv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
-
 
             # ranges
             upper_range1 = (10,255,255)
@@ -171,13 +175,47 @@ class MapPubNode(Node):
         
         while True:
             if self.check_left():
+                self.left = True
                 self.get_logger().info("left open")
                 twist.linear.x = 0.0
+
                 # move forward
-                self.move_forward(3)
+                i = 0
+                while i < 3:
+                    self.velocity_pub.publish(twist)
+                    i = i + 1
+                    time.sleep(1)
+                        
+                    twist.linear.x = 0.0
+                    self.velocity_pub.publish(twist)
+
                 #turn left
-                self.turn('left')
-                self.move_forward(6)
+                angular_speed = 0.5  # rad/s — tune this for your robot
+                duration = self.PI / 2 / abs(angular_speed)  # Time to turn 90°
+
+                twist.angular.z = angular_speed
+
+                # Start rotating
+                start_time = time.time()
+                while time.time() - start_time < duration:
+                    self.velocity_pub.publish(twist)
+                    rclpy.spin_once(self, timeout_sec=0.01)
+
+                    # Stop
+                    twist.angular.z = 0.0
+                    self.velocity_pub.publish(twist)
+
+                # move forward again
+                twist.linear.x = 0.5
+                i = 0
+                while i < 6:
+                    self.velocity_pub.publish(twist)
+                    i = i + 1
+                    time.sleep(1)
+                        
+                    twist.linear.x = 0.0
+                    self.velocity_pub.publish(twist)
+
             elif self.check_front():
                 twist.linear.x = 0.4
                 self.get_logger().info("front open")
@@ -196,7 +234,7 @@ class MapPubNode(Node):
             if self.red_detected:
                 self.get_logger().info("stopping red detected")
                 twist.linear.x = 0.0
-                    
+            self.left = False
             self.velocity_pub.publish(twist)
             time.sleep(1)
 
@@ -245,7 +283,9 @@ class MapPubNode(Node):
         copy[y][x] = -2
         gx, gy = self.real_to_index(self.x, self.y)
         copy[gy][gx] = -3
-        self.get_logger().info("saving grid")
+        # if self.left:
+        self.outputNum += 1
+        self.get_logger().info(f"saving grid{self.outputNum}")
         self.save_grid_to_file(copy)
         return self.grid[y][x] >= 30 or self.grid[y][x] == -1
 
@@ -301,7 +341,8 @@ class MapPubNode(Node):
 
     # maxizek30
     def save_grid_to_file(self, map):
-        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop", "output.txt")
+        fileName = f"output{self.outputNum}.txt"
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop", fileName)
         # Map values to emojis: -1 (unknown): 🟦, 0 (free): ⬜, >=30 (occupied): 🟥, else: ⬛
         def cell_to_emoji(cell):
             if cell == -1:
@@ -319,7 +360,9 @@ class MapPubNode(Node):
 
         with open(desktop_path, "w") as f:
             for row in map:
-                f.write("".join(cell_to_emoji(cell) for cell in row) + "\n")
+                # Reflect on the y‑axis by reversing the row (left ↔ right)
+                inverted_row = row[::-1]
+                f.write("".join(cell_to_emoji(cell) for cell in inverted_row) + "\n")
 
     def quaternion_to_euler(self, x, y, z, w):
         # Roll (x-axis rotation)
