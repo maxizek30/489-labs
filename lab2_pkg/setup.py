@@ -20,7 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'speed_cap_obstacle_detect = lab2_pkg.speed_cap_obstacle_detect:main  '
+            'teleop_demo_node = lab2_pkg.speed_cap_obstacle_detect:main  '
         ],
     },
 )

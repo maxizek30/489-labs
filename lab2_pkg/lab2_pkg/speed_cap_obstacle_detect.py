@@ -1,24 +1,21 @@
 from turtle import up
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist  # Use the correct message type (Twist)
-from std_msgs.msg import Header  # For using headers in the lights messagefro
+from geometry_msgs.msg import Twist
+from std_msgs.msg import Header
 from irobot_create_msgs.msg import LightringLeds
 from sensor_msgs.msg import LaserScan
 import cv2
 from cv_bridge import CvBridge as cvb
 from sensor_msgs.msg import Image
+# from pyzbar.pyzbar import decode
 
-# Assuming LightringLeds is a valid class from your codebase or custom message
-# from your_custom_msgs.msg import LightringLeds  # Uncomment and use if it's a custom message
-
-class SpeedCapObstacleDetect(Node):
+class teleop_demo(Node):
     def __init__(self):
-        # Initialize the node with the name 'speed_cap'
-        super().__init__('speed_cap_obstacle_detect')
+        super().__init__('teleop_demo_node')
+        self.red_detected = False
         
-        # Create a subscription to 'cmd_vel_unfiltered' topic with Twist message type
-        self.speed_cap_subscriber = self.create_subscription(Twist, '/robot1/cmd_vel_unfiltered', self.speed_cap_callback,  10)
+        self.speed_cap_subscriber = self.create_subscription(Twist, '/robot1/cmd_vel_unfiltered', self.stop_on_red,  10)
         self.obstacle_detect_subscriber = self.create_subscription(LaserScan, '/robot1/scan', self.obstacle_callback, 10)
         self.speed_cap_publisher = self.create_publisher(Twist, '/robot1/cmd_vel', 10)
         self.lightring_publisher = self.create_publisher(LightringLeds, '/robot1/cmd_lightring', 10)
@@ -27,73 +24,34 @@ class SpeedCapObstacleDetect(Node):
         # camera vision sub
         self.cam_sub = self.create_subscription(Image, 'robot1/oakd/rgb/preview/image_raw',self.cam_callback, 10)
         self.bridge = cvb()
-        self.red_detected = False
 
-    def cam_callback(self, msg):
-        self.get_logger().info("trying stuff")
-        try:
-            #stuff
-            cv = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-
-            # ranges
-            upper_range = (20,100,120)
-            lower_range = (0,50,60)
-
-            # cv2.bitwise_or(mask1, mask2)
-            # stuff
-            hsv = cv2.cvtColor(cv, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(hsv, lower_range, upper_range)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            area_threshold = 256.0
-            self.red_detected = False
-            for cont in contours:
-                area = cv2.contourArea(cont)
-                self.get_logger().info(area)
-                if area > area_threshold:
-                    self.red_detected = True
-
-        except Exception as e:
-            self.get_logger().error(f"Failed to process: {e}")
-
-    def speed_cap_callback(self, msg):
-        # Assuming LightringLeds is a custom message type and initialized properly
-        lights = LightringLeds()  # Replace with actual message
+    def stop_on_red(self, msg):
+        lights = LightringLeds()
         lights.header.stamp = self.get_clock().now().to_msg()
         lights.override_system = True
 
-        # Get the linear velocity from the Twist message (only considering x direction)
         speedometer = msg.linear.x
+
         speed_msg = Twist()
         speed_msg.linear.x = speedometer
         speed_msg.angular.z = msg.angular.z
-        self.get_logger().info(f"Received speed: {speedometer}")
         
-
-        # Cap speed at 0.4 and adjust the lights accordingly
-        if speedometer > 0.4:
-            speed_msg.linear.x = 0.4
-            for i in range(6):  # Assuming we have 6 LEDs to controlZ
-                lights.leds[i].red = 0
-                lights.leds[i].green = 255
-                lights.leds[i].blue = 0
-        else:
-            for i in range(6):  # Assuming we have 6 LEDs to control
-                lights.leds[i].red = 0
-                lights.leds[i].green = 0
-                lights.leds[i].blue = 255
         if self.red_detected:
             speed_msg.linear.x = 0.0 # stop
-            for i in range(6):  # Assuming we have 6 LEDs to control
+            self.get_logger().info("Stopping...")
+            for i in range(6):
                 lights.leds[i].red = 255
                 lights.leds[i].green = 0
                 lights.leds[i].blue = 0
 
+        else:
+            for i in range(6):
+                lights.leds[i].red = 0
+                lights.leds[i].green = 255
+                lights.leds[i].blue = 0
+
         self.lightring_publisher.publish(lights)
         self.speed_cap_publisher.publish(speed_msg)
-
-        # Log the speed
-        self.get_logger().info(f"Speed after cap: {speedometer}")
     
     def obstacle_callback(self, msg):
         self.obstacle_detected = False
@@ -106,13 +64,55 @@ class SpeedCapObstacleDetect(Node):
                 if laser_range[i] < 0.7:
                     self.obstacle_detected = True
                 
-        
+    def cam_callback(self, msg):
+        try:
+            #stuff
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            cv2.waitKey(1)
+            hsv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2HSV)
+
+            # ranges
+            upper_range1 = (10,255,255)
+            lower_range1 = (0,100,100)
+            upper_range2 = (180,255,255)
+            lower_range2 = (160,100,100)
+            mask1 = cv2.inRange(hsv_image, lower_range1, upper_range1)
+            mask2 = cv2.inRange(hsv_image, lower_range2, upper_range2)
+
+            mask = cv2.bitwise_or(mask1, mask2)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            height, width = hsv_image.shape[:2]
+            area_threshold = 0.20 * (height * width)
+
+            flag = False
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area > area_threshold:
+                    flag = True
+            if flag:
+                self.red_detected = True
+                self.get_logger().info("RED DETECTED")
+            else: 
+                self.red_detected = False
+
+            # barcodes = decode(cv_image)
+            # if barcodes:
+            #     self.get_logger().info("QR CODE SEEN")
+            #     for barcode in barcodes:
+            #         (x,y,w,h) = barcode.rect
+            #         data = barcode.data.decode("utf-8")
+            #         code_type = barcode.type
+
+            cv2.imshow("Camera feed", cv_image)
+        except Exception as e:
+            self.get_logger().error(f"Failed to process: {e}")
 
 def main(args=None):
     rclpy.init(args=args)
 
     # Create an instance of the node
-    node = SpeedCapObstacleDetect()
+    node = teleop_demo()
 
     # Keep the node spinning to process callbacks
     rclpy.spin(node)
