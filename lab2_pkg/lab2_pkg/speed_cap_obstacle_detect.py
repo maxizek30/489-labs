@@ -8,7 +8,8 @@ from sensor_msgs.msg import LaserScan
 import cv2
 from cv_bridge import CvBridge as cvb
 from sensor_msgs.msg import Image
-# from pyzbar.pyzbar import decode
+from pyzbar.pyzbar import decode
+import numpy as np
 
 class teleop_demo(Node):
     def __init__(self):
@@ -24,6 +25,23 @@ class teleop_demo(Node):
         # camera vision sub
         self.cam_sub = self.create_subscription(Image, 'robot1/oakd/rgb/preview/image_raw',self.cam_callback, 10)
         self.bridge = cvb()
+        self.codes = []
+
+        self.x = 0
+        self.y = 0
+        self.ang = 0
+        
+        self.pos_subscriber = self.create_subscription(
+            PoseWithCovarianceStamped, '/robot1/pose', self.callback_pos, 10)
+
+
+
+     def callback_pos(self, msg):
+        self.get_logger().info("getting position")
+        self.x = msg.pose.pose.position.x
+        self.y = msg.pose.pose.position.y
+        quaternion = msg.pose.pose.orientation
+        (_, _, self.ang) = self.quaternion_to_euler(quaternion.x, quaternion.y, quaternion.z, quaternion.w)
 
     def stop_on_red(self, msg):
         lights = LightringLeds()
@@ -96,13 +114,25 @@ class teleop_demo(Node):
             else: 
                 self.red_detected = False
 
-            # barcodes = decode(cv_image)
-            # if barcodes:
-            #     self.get_logger().info("QR CODE SEEN")
-            #     for barcode in barcodes:
-            #         (x,y,w,h) = barcode.rect
-            #         data = barcode.data.decode("utf-8")
-            #         code_type = barcode.type
+            barcodes = decode(cv_image)
+            if barcodes:
+                self.get_logger().info("QR CODE SEEN")
+                for barcode in barcodes:
+                    (x,y,w,h) = barcode.rect
+                    data = barcode.data.decode("utf-8")
+                    code_type = barcode.type
+
+                    if data in self.codes:
+                        continue
+                    if w == 0:
+                        continue
+                    
+                    distance = (0.174) / w
+
+                    x_qr = self.x + np.cos(self.ang) * distance
+                    y_qr = self.y + np.sin(self.ang) * distance
+
+                    self.codes[data] = (x_qr, y_qr)
 
             cv2.imshow("Camera feed", cv_image)
         except Exception as e:
